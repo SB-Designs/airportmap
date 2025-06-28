@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>World Airports Map</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <script src="https://api.mapbox.com/mapbox-gl-js/v2.16.1/mapbox-gl.js"></script>
+  <link href="https://api.mapbox.com/mapbox-gl-js/v2.16.1/mapbox-gl.css" rel="stylesheet"/>
+  <style>
+    body { margin:0; padding:0; }
+    #map { position:absolute; top:0; bottom:0; width:100vw; height:100vh; }
+    .marker {
+      background: #1976d2;
+      border-radius: 50%;
+      width: 8px;
+      height: 8px;
+      border: 2px solid #fff;
+      box-shadow: 0 0 2px #0007;
+    }
+    .mapboxgl-popup {
+      max-width: 240px;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+mapboxgl.accessToken = 'pk.eyJ1Ijoia2FpbGFuIiwiYSI6ImNreHh6MjNtNzJhd3oyb21wYjRkY2U0aGsifQ.tZzQ-GAom5_D8SLwrqmy-Q';
+
+const map = new mapboxgl.Map({
+  container: 'map',
+  style: 'mapbox://styles/mapbox/light-v11',
+  center: [0, 20],
+  zoom: 1.7,
+  minZoom: 1.4,
+  maxZoom: 12
+});
+
+// Helper: Airport marker color by size/type
+function airportColor(airport) {
+  if (airport.status === 0 || airport.type === 'closed') return '#888';
+  if (airport.size === 'large') return '#d32f2f';
+  if (airport.size === 'medium') return '#ffa000';
+  if (airport.type === 'heliport') return '#009688';
+  if (airport.type === 'seaplanes') return '#0288d1';
+  return '#1976d2'; // small/unknown
+}
+
+function airportIcon(airport) {
+  if (airport.status === 0 || airport.type === 'closed') return '✖️';
+  if (airport.type === 'heliport') return '🚁';
+  if (airport.type === 'seaplanes') return '🛥️';
+  return '🛫';
+}
+
+// Load airport data (raw JSON, large file)
+fetch('/airports.json')
+.then(res => res.json())
+.then(data => {
+  // Filter: Valid coordinates only
+  const points = data.filter(a =>
+    a.status !== undefined &&
+    a.lat && a.lon &&
+    !isNaN(Number(a.lat)) && !isNaN(Number(a.lon))
+  );
+
+  // Convert to GeoJSON
+  const geojson = {
+    type: "FeatureCollection",
+    features: points.map(a => ({
+      type: "Feature",
+      geometry: {
+        type: "Point",
+        coordinates: [parseFloat(a.lon), parseFloat(a.lat)]
+      },
+      properties: {
+        iata: a.iata,
+        name: a.name,
+        type: a.type,
+        status: a.status,
+        size: a.size,
+        iso: a.iso,
+        continent: a.continent
+      }
+    }))
+  };
+
+  // Add as a source
+  map.on('load', () => {
+    map.addSource('airports', {
+      type: 'geojson',
+      data: geojson,
+      cluster: true,
+      clusterMaxZoom: 6,
+      clusterRadius: 20
+    });
+
+    // Cluster circles
+    map.addLayer({
+      id: 'clusters',
+      type: 'circle',
+      source: 'airports',
+      filter: ['has', 'point_count'],
+      paint: {
+        'circle-color': [
+          'step', ['get', 'point_count'],
+          '#1976d2', 30,
+          '#ffa000', 100,
+          '#d32f2f', 500
+        ],
+        'circle-radius': [
+          'step', ['get', 'point_count'],
+          13, 30, 18, 100, 26, 500, 38
+        ],
+        'circle-stroke-width': 1,
+        'circle-stroke-color': '#fff'
+      }
+    });
+
+    // Cluster count
+    map.addLayer({
+      id: 'cluster-count',
+      type: 'symbol',
+      source: 'airports',
+      filter: ['has', 'point_count'],
+      layout: {
+        'text-field': '{point_count_abbreviated}',
+        'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+        'text-size': 13
+      }
+    });
+
+    // Unclustered points (airports)
+    map.addLayer({
+      id: 'unclustered-point',
+      type: 'circle',
+      source: 'airports',
+      filter: ['!', ['has', 'point_count']],
+      paint: {
+        'circle-color': [
+          'match',
+          ['get', 'type'],
+          'closed', '#888',
+          'heliport', '#009688',
+          'seaplanes', '#0288d1',
+          [
+            'match', ['get', 'size'],
+            'large', '#d32f2f',
+            'medium', '#ffa000',
+            /* other */ '#1976d2'
+          ]
+        ],
+        'circle-radius': [
+          'match',
+          ['get', 'size'],
+          'large', 8,
+          'medium', 7,
+          'small', 6,
+          /* null/other */ 5
+        ],
+        'circle-stroke-width': 1,
+        'circle-stroke-color': '#fff',
+        'circle-opacity': [
+          'case',
+          ['==', ['get', 'status'], 0],
+          0.4,
+          1
+        ]
+      }
+    });
+
+    // Popups for unclustered points
+    map.on('click', 'unclustered-point', (e) => {
+      const props = e.features[0].properties;
+      const coords = e.features[0].geometry.coordinates.slice();
+      const html = `
+        <strong>${airportIcon(props)} ${props.name || '(Unnamed Airport)'}</strong><br>
+        <b>IATA:</b> ${props.iata || '-'}<br>
+        <b>Type:</b> ${props.type || '-'}<br>
+        <b>Size:</b> ${props.size || '-'}<br>
+        <b>Country:</b> ${props.iso || '-'}<br>
+        <b>Status:</b> ${props.status == 1 ? 'Open' : 'Closed'}
+      `;
+      new mapboxgl.Popup()
+        .setLngLat(coords)
+        .setHTML(html)
+        .addTo(map);
+    });
+
+    // Change cursor to pointer on hover
+    map.on('mouseenter', 'unclustered-point', () => {
+      map.getCanvas().style.cursor = 'pointer';
+    });
+    map.on('mouseleave', 'unclustered-point', () => {
+      map.getCanvas().style.cursor = '';
+    });
+
+    // Zoom on cluster click
+    map.on('click', 'clusters', (e) => {
+      const features = map.queryRenderedFeatures(e.point, { layers: ['clusters'] });
+      const clusterId = features[0].properties.cluster_id;
+      map.getSource('airports').getClusterExpansionZoom(clusterId, (err, zoom) => {
+        if (err) return;
+        map.easeTo({
+          center: features[0].geometry.coordinates,
+          zoom: zoom
+        });
+      });
+    });
+  });
+});
+</script>
+</body>
+</html>
